@@ -1,0 +1,18 @@
+manifestVersion: 1
+name: "@dieter/speedport-plus-2"
+version: "2026.08.24.12"
+description: "Authenticated observation and explicit session management for Arcadyan Speedport Plus 2 routers."
+repository: https://github.com/Dieterbe/swamp-speedport-plus-2
+models:
+  - speedport_plus_2.ts
+additionalFiles:
+  - README.md
+  - LICENSE
+platforms:
+  - linux-x86_64
+labels:
+  - speedport
+  - arcadyan
+  - router
+  - networking
+  - monitoring
