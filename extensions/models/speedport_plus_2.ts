@@ -22,14 +22,29 @@ const RouterBaseUrlSchema = z.string().url()
     }
   }, "Router base URL must not contain a username or password");
 
+const PinnedPublicKeySchema = z.string().regex(
+  /^sha256\/[\/][A-Za-z0-9+/]{43}=$/,
+  "Pinned public key must use curl's sha256//BASE64 format",
+);
+
 const GlobalArgsSchema = z.object({
   baseUrl: RouterBaseUrlSchema,
+  expectedHost: z.string().min(1).max(253).regex(
+    /^[A-Za-z0-9.[\]:_-]+$/,
+    "Expected host must be a hostname or IP address without a scheme or path",
+  ),
   username: z.string().min(1).meta({ sensitive: true }),
   password: z.string().min(1).meta({ sensitive: true }),
   allowInsecureTls: z.boolean().default(false),
+  pinnedPublicKey: PinnedPublicKeySchema.optional(),
 });
 
 type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
+
+const ResourceNameSchema = z.string().regex(
+  /^[a-z0-9][a-z0-9_-]{0,127}$/,
+  "Resource name must start with a lowercase letter or digit and contain only lowercase letters, digits, underscores, or hyphens",
+);
 
 const SnapshotSchema = z.object({
   observedAt: z.iso.datetime(),
@@ -179,6 +194,22 @@ const LogContractSchema = z.object({
     timestampLikeCount: z.number().int().nonnegative(),
     bootKeywordCount: z.number().int().nonnegative(),
   }).nullable(),
+  sessionReleased: z.boolean(),
+  sessionReleaseError: z.string().nullable(),
+});
+
+const RouterLogsSchema = z.object({
+  observedAt: z.iso.datetime(),
+  timeFrame: LogTimeFrameSchema,
+  categories: z.array(z.object({
+    category: LogCategorySchema,
+    handlerPath: z.literal("/actionHandler/ajax_troubleshooting_logs.php"),
+    httpStatus: z.number().int(),
+    contentType: z.string().nullable(),
+    byteLength: z.number().int().nonnegative(),
+    entryCount: z.number().int().nonnegative(),
+    rawBody: z.string(),
+  })).length(3),
   sessionReleased: z.boolean(),
   sessionReleaseError: z.string().nullable(),
 });
@@ -890,17 +921,27 @@ class CurlSession {
   readonly #directory: string;
   readonly #cookiePath: string;
   readonly #allowInsecureTls: boolean;
+  readonly #pinnedPublicKey: string | undefined;
 
-  private constructor(directory: string, allowInsecureTls: boolean) {
+  private constructor(
+    directory: string,
+    allowInsecureTls: boolean,
+    pinnedPublicKey: string | undefined,
+  ) {
     this.#directory = directory;
     this.#cookiePath = `${directory}/cookies.txt`;
     this.#allowInsecureTls = allowInsecureTls;
+    this.#pinnedPublicKey = pinnedPublicKey;
   }
 
-  static async create(allowInsecureTls: boolean): Promise<CurlSession> {
+  static async create(
+    allowInsecureTls: boolean,
+    pinnedPublicKey: string | undefined,
+  ): Promise<CurlSession> {
     return new CurlSession(
       await Deno.makeTempDir({ prefix: "speedport-plus-2-" }),
       allowInsecureTls,
+      pinnedPublicKey,
     );
   }
 
@@ -932,6 +973,9 @@ class CurlSession {
       method,
     ];
     if (this.#allowInsecureTls) commandArgs.push("--insecure");
+    if (this.#pinnedPublicKey !== undefined) {
+      commandArgs.push("--pinnedpubkey", this.#pinnedPublicKey);
+    }
     for (const [key, value] of headers.entries()) {
       commandArgs.push("--header", `${key}: ${value}`);
     }
@@ -1041,7 +1085,20 @@ async function openAuthenticatedSession(args: GlobalArgs): Promise<{
   pageUrl: URL;
 }> {
   const baseUrl = new URL(args.baseUrl);
-  const session = await CurlSession.create(args.allowInsecureTls);
+  if (baseUrl.hostname.toLowerCase() !== args.expectedHost.toLowerCase()) {
+    throw new Error(
+      "Configured expected host does not match the router base URL",
+    );
+  }
+  if (args.allowInsecureTls && args.pinnedPublicKey === undefined) {
+    throw new Error(
+      "A pinned public key is required when insecure TLS is enabled",
+    );
+  }
+  const session = await CurlSession.create(
+    args.allowInsecureTls,
+    args.pinnedPublicKey,
+  );
 
   try {
     const initial = await session.request(baseUrl, "GET");
@@ -1133,8 +1190,15 @@ async function authenticatedHome(args: GlobalArgs): Promise<{
 /** Read-only model for the Arcadyan Speedport Plus 2 web interface. */
 export const model = {
   type: "@dieter/speedport-plus-2",
-  version: "2026.08.24.13",
+  version: "2026.08.25.1",
   globalArguments: GlobalArgsSchema,
+  upgrades: [
+    {
+      toVersion: "2026.08.25.1",
+      description: "Add optional resource names to status and log collection",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
   resources: {
     snapshot: {
       description: "Read-only router web-interface snapshot",
@@ -1173,6 +1237,13 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 10,
     },
+    routerLogs: {
+      description:
+        "Exact router log responses for system, event, and firewall categories",
+      schema: RouterLogsSchema,
+      lifetime: "infinite",
+      garbageCollection: 10,
+    },
     routerStatus: {
       description: "Current read-only router connection status",
       schema: RouterStatusSchema,
@@ -1193,9 +1264,9 @@ export const model = {
     },
   },
   checks: {
-    "private-router-action": {
+    "trusted-router-action": {
       description:
-        "Restrict mutating actions to the configured private HTTPS router",
+        "Restrict mutating actions to the explicitly expected HTTPS host",
       labels: ["policy"],
       appliesTo: ["action"],
       execute: (context: { globalArgs: GlobalArgs }): {
@@ -1204,10 +1275,13 @@ export const model = {
       } => {
         const url = new URL(context.globalArgs.baseUrl);
         const pass = url.protocol === "https:" &&
-          url.hostname === "192.168.1.1";
+          url.hostname.toLowerCase() ===
+            context.globalArgs.expectedHost.toLowerCase();
         return pass ? { pass: true } : {
           pass: false,
-          errors: ["Session takeover is restricted to https://192.168.1.1/"],
+          errors: [
+            "Session takeover is restricted to the explicitly expected HTTPS host",
+          ],
         };
       },
     },
@@ -1405,9 +1479,11 @@ export const model = {
     },
     status: {
       description: "Read current WAN and DSL connection status",
-      arguments: z.object({}),
+      arguments: z.object({
+        name: ResourceNameSchema.optional(),
+      }),
       execute: async (
-        _methodArgs: Record<string, never>,
+        methodArgs: { name?: string },
         context: {
           globalArgs: GlobalArgs;
           logger: {
@@ -1496,7 +1572,7 @@ export const model = {
           result.sessionReleaseError = release.error;
           const handle = await context.writeResource(
             "routerStatus",
-            "router-status",
+            methodArgs.name ?? "router-status",
             result,
           );
           context.logger.info("Read router connection status", {
@@ -1662,6 +1738,154 @@ export const model = {
             timeFrame: result.timeFrame,
             bodyKind: result.bodyKind,
             byteLength: result.byteLength,
+            sessionReleased: result.sessionReleased,
+          });
+          return { dataHandles: [handle] };
+        } finally {
+          if (!conflict && !releaseAttempted) {
+            await releaseOwnedSession(
+              authenticated.session,
+              authenticated.baseUrl,
+            );
+          }
+          await authenticated.session.close();
+        }
+      },
+    },
+    collectLogs: {
+      description:
+        "Collect exact system, event, and firewall log responses in one authenticated session",
+      arguments: z.object({
+        timeFrame: LogTimeFrameSchema,
+        name: ResourceNameSchema.optional(),
+      }),
+      execute: async (
+        methodArgs: {
+          timeFrame: z.infer<typeof LogTimeFrameSchema>;
+          name?: string;
+        },
+        context: {
+          globalArgs: GlobalArgs;
+          logger: {
+            info: (
+              message: string,
+              properties?: Record<string, unknown>,
+            ) => void;
+          };
+          writeResource: (
+            specName: string,
+            name: string,
+            data: z.infer<typeof RouterLogsSchema>,
+          ) => Promise<{ name: string }>;
+        },
+      ): Promise<{ dataHandles: Array<{ name: string }> }> => {
+        context.logger.info("Collecting all router logs", {
+          timeFrame: methodArgs.timeFrame,
+        });
+        const authenticated = await openAuthenticatedSession(
+          context.globalArgs,
+        );
+        const conflict = /another user|already logged in|active session/i.test(
+          authenticated.html,
+        );
+        let releaseAttempted = false;
+        try {
+          if (conflict) {
+            throw new Error(
+              "Router presented a session conflict; run the explicit takeover action first",
+            );
+          }
+          const pageUrl = new URL(
+            "troubleshooting_logs.php",
+            authenticated.baseUrl,
+          );
+          const page = await authenticated.session.request(pageUrl, "GET");
+          requireStatus(page, "Router log-page request", [200]);
+          const csrfToken = await authenticated.session.cookie("csrfp_token");
+          if (!csrfToken) {
+            throw new Error("Router CSRF cookie was not available");
+          }
+          const handlerPath =
+            "/actionHandler/ajax_troubleshooting_logs.php" as const;
+          const categories = [];
+          for (const category of LogCategorySchema.options) {
+            const response = await authenticated.session.request(
+              new URL(handlerPath, authenticated.baseUrl),
+              "POST",
+              new Headers({
+                "content-type": "application/x-www-form-urlencoded",
+                "referer": pageUrl.toString(),
+              }),
+              new URLSearchParams({
+                mode: category,
+                timef: methodArgs.timeFrame,
+                csrfp_token: csrfToken,
+              }).toString(),
+            );
+            requireStatus(
+              response,
+              `Router ${category} log-query request`,
+              [200],
+            );
+            const byteLength = new TextEncoder().encode(response.body)
+              .byteLength;
+            if (byteLength > 5 * 1024 * 1024) {
+              throw new Error(
+                `Router ${category} log response exceeded the 5 MiB safety limit`,
+              );
+            }
+            let entryCount = 0;
+            try {
+              const parsed: unknown = JSON.parse(response.body);
+              entryCount = Array.isArray(parsed)
+                ? parsed.length
+                : parsed !== null && typeof parsed === "object"
+                ? Object.keys(parsed).length
+                : response.body.trim() === ""
+                ? 0
+                : 1;
+            } catch {
+              entryCount = response.body.trim() === "" ? 0 : 1;
+            }
+            categories.push({
+              category,
+              handlerPath,
+              httpStatus: response.status,
+              contentType: response.headers.get("content-type"),
+              byteLength,
+              entryCount,
+              rawBody: response.body,
+            });
+          }
+          const release = await releaseOwnedSession(
+            authenticated.session,
+            authenticated.baseUrl,
+          );
+          releaseAttempted = true;
+          const result = {
+            observedAt: new Date().toISOString(),
+            timeFrame: methodArgs.timeFrame,
+            categories,
+            sessionReleased: release.released,
+            sessionReleaseError: release.error,
+          };
+          const instanceName = methodArgs.name ??
+            `router-logs-${
+              methodArgs.timeFrame.toLowerCase().replaceAll(" ", "-")
+            }`;
+          const handle = await context.writeResource(
+            "routerLogs",
+            instanceName,
+            result,
+          );
+          context.logger.info("Collected all router logs", {
+            timeFrame: result.timeFrame,
+            categoryCounts: Object.fromEntries(
+              result.categories.map((item) => [
+                item.category,
+                item.entryCount,
+              ]),
+            ),
             sessionReleased: result.sessionReleased,
           });
           return { dataHandles: [handle] };
