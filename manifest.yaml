@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@dieter/speedport-plus-2"
-version: "2026.08.24.12"
+version: "2026.08.24.13"
 description: "Authenticated observation and explicit session management for Arcadyan Speedport Plus 2 routers."
 repository: https://github.com/Dieterbe/swamp-speedport-plus-2
 models:

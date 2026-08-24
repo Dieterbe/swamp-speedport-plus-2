@@ -13,6 +13,11 @@ for typed, repeatable status collection. Disabling TLS verification globally was
 rejected; insecure TLS is an explicit argument and mutating session action is
 restricted to the expected private router address.
 
+Router URLs must use HTTPS and cannot contain embedded credentials. Plain HTTP
+was rejected even for private addresses because authentication data crosses the
+connection; `allowInsecureTls` is the narrower option for a self-signed router
+certificate.
+
 Read-only discovery methods log out after every authenticated session. Session
 takeover is kept in a separate action that requires explicit confirmation
 because it changes router session state.

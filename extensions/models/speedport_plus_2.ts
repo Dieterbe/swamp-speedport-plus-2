@@ -5,8 +5,25 @@
  */
 import { z } from "npm:zod@4";
 
+const RouterBaseUrlSchema = z.string().url()
+  .refine((value) => {
+    try {
+      return new URL(value).protocol === "https:";
+    } catch {
+      return false;
+    }
+  }, "Router base URL must use HTTPS")
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return url.username === "" && url.password === "";
+    } catch {
+      return false;
+    }
+  }, "Router base URL must not contain a username or password");
+
 const GlobalArgsSchema = z.object({
-  baseUrl: z.string().url(),
+  baseUrl: RouterBaseUrlSchema,
   username: z.string().min(1).meta({ sensitive: true }),
   password: z.string().min(1).meta({ sensitive: true }),
   allowInsecureTls: z.boolean().default(false),
@@ -830,10 +847,18 @@ function requireStatus(
   allowed: number[],
 ): void {
   if (!allowed.includes(response.status)) {
-    const summary = response.body.replace(/\s+/g, " ").trim().slice(0, 200);
     throw new Error(
-      `${operation} returned HTTP ${response.status}: ${summary}`,
+      `${operation} returned HTTP ${response.status}`,
     );
+  }
+}
+
+function requireSafeRouterUrl(url: URL): void {
+  if (url.protocol !== "https:") {
+    throw new Error("Router requests require HTTPS");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("Router request URL must not contain credentials");
   }
 }
 
@@ -885,6 +910,7 @@ class CurlSession {
     headers: Headers = new Headers(),
     body?: string,
   ): Promise<RouterResponse> {
+    requireSafeRouterUrl(url);
     const headerPath = `${this.#directory}/headers.txt`;
     const bodyPath = `${this.#directory}/body.txt`;
     const commandArgs = [
@@ -1107,7 +1133,7 @@ async function authenticatedHome(args: GlobalArgs): Promise<{
 /** Read-only model for the Arcadyan Speedport Plus 2 web interface. */
 export const model = {
   type: "@dieter/speedport-plus-2",
-  version: "2026.08.24.12",
+  version: "2026.08.24.13",
   globalArguments: GlobalArgsSchema,
   resources: {
     snapshot: {
