@@ -102,8 +102,8 @@ Create a model definition with vault-backed credentials:
 
 ```sh
 swamp model create @dieter/speedport-plus-2 home-router \
-  --global-arg baseUrl=https://192.168.1.1/ \
-  --global-arg expectedHost=192.168.1.1 \
+  --global-arg baseUrl=https://192.0.2.1/ \
+  --global-arg expectedHost=192.0.2.1 \
   --global-arg 'username=${{ vault.get(router-secrets, ROUTER_USERNAME) }}' \
   --global-arg 'password=${{ vault.get(router-secrets, ROUTER_PASSWORD) }}' \
   --global-arg allowInsecureTls=true \
