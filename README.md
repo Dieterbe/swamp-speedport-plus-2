@@ -28,6 +28,17 @@ Read-only discovery methods log out after every authenticated session. Session
 takeover is kept in a separate action that requires explicit confirmation
 because it changes router session state.
 
+`inspectPage` records typed form-control state for explicitly allowed pages.
+Password, key, PIN, CSRF/token, and aggregate configuration values are redacted
+because raw page capture could retain credentials; retaining raw HTML was
+rejected as unnecessarily sensitive for configuration diagnostics.
+
+`inspectNetworkConfiguration` fetches global Wi-Fi, generic SSID, LAN/DHCP,
+reserved-IP, and router-advertised numeric SSID edit pages in one authenticated
+session. One fan-out method avoids lock contention and repeated router logins;
+separate per-page method loops were rejected because this router permits only
+one fragile management session at a time.
+
 ## Diagnostics
 
 `status` stores current Internet, WAN, and xDSL state, including sync rates, SNR

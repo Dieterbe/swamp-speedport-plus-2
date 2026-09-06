@@ -107,11 +107,18 @@ const InspectablePageSchema = z.enum([
   "/arc_wan_config.php",
   "/arc_physical_config.php",
   "/arc_xdsl_statistic.php",
+  "/arc_static_dhcp.php",
   "/connected_devices_computers.php",
   "/arc_routing_table.php",
   "/hardware.php",
+  "/lan.php",
   "/software.php",
   "/troubleshooting_logs.php",
+  "/wifi.php",
+  "/wifi_spectrum_analyzer.php",
+  "/wireless_network_configuration.php",
+  "/wireless_network_configuration_generic.php",
+  "/wireless_wisp.php",
 ]);
 
 const PageInspectionSchema = z.object({
@@ -123,6 +130,37 @@ const PageInspectionSchema = z.object({
   formActions: z.array(z.string()),
   endpointShapes: z.array(z.string()),
   ajaxCalls: SnapshotSchema.shape.ajaxCalls,
+  inputControls: z.array(z.object({
+    id: z.string().nullable(),
+    name: z.string().nullable(),
+    type: z.string(),
+    checked: z.boolean(),
+    disabled: z.boolean(),
+    sensitive: z.boolean(),
+    value: z.string().nullable(),
+  })),
+  selectControls: z.array(z.object({
+    id: z.string().nullable(),
+    name: z.string().nullable(),
+    disabled: z.boolean(),
+    options: z.array(z.object({
+      value: z.string(),
+      label: z.string(),
+      selected: z.boolean(),
+    })),
+  })),
+  sessionReleased: z.boolean(),
+  sessionReleaseError: z.string().nullable(),
+});
+
+const NetworkConfigurationSchema = z.object({
+  observedAt: z.iso.datetime(),
+  pages: z.array(z.object({
+    url: z.string(),
+    pageHeading: z.string().nullable(),
+    inputControls: PageInspectionSchema.shape.inputControls,
+    selectControls: PageInspectionSchema.shape.selectControls,
+  })),
   sessionReleased: z.boolean(),
   sessionReleaseError: z.string().nullable(),
 });
@@ -393,6 +431,107 @@ function selectControls(html: string): Array<{
         label: plainText(option[2]).slice(0, 120),
       })),
     }),
+  );
+}
+
+function configurationInputControls(
+  html: string,
+  retainNonSensitiveValues = true,
+): Array<{
+  id: string | null;
+  name: string | null;
+  type: string;
+  checked: boolean;
+  disabled: boolean;
+  sensitive: boolean;
+  value: string | null;
+}> {
+  return [...html.matchAll(/<input\b([^>]*)>/gi)].map((input) => {
+    const attributes = input[1];
+    const id = match(attributes, /\bid=["']([^"']+)["']/i);
+    const name = match(attributes, /\bname=["']([^"']+)["']/i);
+    const type = match(attributes, /\btype=["']([^"']+)["']/i)
+      ?.toLowerCase() ?? "text";
+    const identifier = `${id ?? ""} ${name ?? ""}`;
+    const sensitive = !retainNonSensitiveValues || type === "password" ||
+      /(?:csrf|token|password|passwd|secret|passphrase|psk|configinfo|(?:^|[\s_.-])(?:pin|key)(?:$|[\s_.-])|(?:wifi|radius)[\w.-]*key)/i
+        .test(identifier);
+    const rawValue = match(attributes, /\bvalue=["']([^"']*)["']/i);
+    return {
+      id,
+      name,
+      type,
+      checked: /\bchecked(?:\s*=|\s|$)/i.test(attributes),
+      disabled: /\bdisabled(?:\s*=|\s|$)/i.test(attributes),
+      sensitive,
+      value: sensitive || rawValue === null
+        ? null
+        : plainText(rawValue).slice(0, 500),
+    };
+  });
+}
+
+function configurationSelectControls(html: string): Array<{
+  id: string | null;
+  name: string | null;
+  disabled: boolean;
+  options: Array<{ value: string; label: string; selected: boolean }>;
+}> {
+  return [...html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)].map(
+    (select) => ({
+      id: match(select[1], /\bid=["']([^"']+)["']/i),
+      name: match(select[1], /\bname=["']([^"']+)["']/i),
+      disabled: /\bdisabled(?:\s*=|\s|$)/i.test(select[1]),
+      options: [...select[2].matchAll(
+        /<option\b([^>]*)>([\s\S]*?)<\/option>/gi,
+      )].map((option) => ({
+        value: match(option[1], /\bvalue=["']([^"']*)["']/i) ?? "",
+        label: plainText(option[2]).slice(0, 120),
+        selected: /\bselected(?:\s*=|\s|$)/i.test(option[1]),
+      })),
+    }),
+  );
+}
+
+/** Parsing helpers exported only for deterministic fixture tests. */
+export const testHelpers = {
+  configurationInputControls,
+  configurationSelectControls,
+  discoveredWirelessEditUrls,
+};
+
+function discoveredWirelessEditUrls(html: string, baseUrl: URL): URL[] {
+  const urls = new Map<string, URL>();
+  for (
+    const entry of html.matchAll(
+      /["']([^"']*wireless_network_configuration_edit(?:_guest_network)?\.php\?[^"']+)["']/gi,
+    )
+  ) {
+    let url: URL;
+    try {
+      url = new URL(entry[1].replaceAll("&amp;", "&"), baseUrl);
+    } catch {
+      continue;
+    }
+    if (url.origin !== baseUrl.origin) continue;
+    const allowed =
+      (url.pathname === "/wireless_network_configuration_edit.php" &&
+        url.searchParams.size === 1 &&
+        /^\d{1,3}$/.test(url.searchParams.get("id") ?? "")) ||
+      (url.pathname ===
+          "/wireless_network_configuration_edit_guest_network.php" &&
+        url.searchParams.size === 1 &&
+        /^\d{1,3}$/.test(url.searchParams.get("guest_id") ?? ""));
+    if (!allowed) continue;
+    urls.set(`${url.pathname}${url.search}`, url);
+  }
+  if (urls.size > 32) {
+    throw new Error("Router advertised more than 32 wireless edit pages");
+  }
+  return [...urls.values()].sort((left, right) =>
+    `${left.pathname}${left.search}`.localeCompare(
+      `${right.pathname}${right.search}`,
+    )
   );
 }
 
@@ -1190,12 +1329,38 @@ async function authenticatedHome(args: GlobalArgs): Promise<{
 /** Read-only model for the Arcadyan Speedport Plus 2 web interface. */
 export const model = {
   type: "@dieter/speedport-plus-2",
-  version: "2026.08.25.1",
+  version: "2026.09.07.2",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
       toVersion: "2026.08.25.1",
       description: "Add optional resource names to status and log collection",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.06.1",
+      description: "Allow read-only inspection of Wi-Fi and LAN pages",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.06.2",
+      description: "Expose redacted form-control state during page inspection",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.06.3",
+      description: "Harden sensitive form-field name detection",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.07.1",
+      description: "Add read-only Wi-Fi and DHCP configuration diagnostics",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.07.2",
+      description:
+        "Inspect the router's actual LAN and DHCP configuration pages",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -1262,6 +1427,12 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 30,
     },
+    networkConfiguration: {
+      description: "Redacted Wi-Fi and DHCP configuration diagnostics",
+      schema: NetworkConfigurationSchema,
+      lifetime: "infinite",
+      garbageCollection: 30,
+    },
   },
   checks: {
     "trusted-router-action": {
@@ -1287,6 +1458,126 @@ export const model = {
     },
   },
   methods: {
+    inspectNetworkConfiguration: {
+      description: "Inspect redacted Wi-Fi and DHCP configuration",
+      arguments: z.object({
+        name: ResourceNameSchema.optional(),
+      }),
+      execute: async (
+        methodArgs: { name?: string },
+        context: {
+          globalArgs: GlobalArgs;
+          logger: {
+            info: (
+              message: string,
+              properties?: Record<string, unknown>,
+            ) => void;
+          };
+          writeResource: (
+            specName: string,
+            name: string,
+            data: z.infer<typeof NetworkConfigurationSchema>,
+          ) => Promise<{ name: string }>;
+        },
+      ): Promise<{ dataHandles: Array<{ name: string }> }> => {
+        context.logger.info("Inspecting router Wi-Fi and DHCP configuration");
+        const authenticated = await openAuthenticatedSession(
+          context.globalArgs,
+        );
+        const conflict = /another user|already logged in|active session/i.test(
+          authenticated.html,
+        );
+        let releaseAttempted = false;
+        try {
+          if (conflict) {
+            throw new Error(
+              "Router presented a session conflict; run the explicit takeover action first",
+            );
+          }
+          const advancedUrl = new URL(
+            "/wireless_network_configuration.php",
+            authenticated.baseUrl,
+          );
+          const advanced = await authenticated.session.request(
+            advancedUrl,
+            "GET",
+          );
+          requireStatus(advanced, "Router advanced Wi-Fi page request", [200]);
+          const urls = [
+            advancedUrl,
+            new URL(
+              "/wireless_network_configuration_generic.php",
+              authenticated.baseUrl,
+            ),
+            new URL("/network_setup.php", authenticated.baseUrl),
+            new URL("/local_ip_configuration.php", authenticated.baseUrl),
+            new URL(
+              "/local_ip_configuration_other.php",
+              authenticated.baseUrl,
+            ),
+            new URL("/arc_static_dhcp.php", authenticated.baseUrl),
+            ...discoveredWirelessEditUrls(
+              advanced.body,
+              authenticated.baseUrl,
+            ),
+          ];
+          const pages = [];
+          for (const url of urls) {
+            const response = url === advancedUrl
+              ? advanced
+              : await authenticated.session.request(url, "GET");
+            requireStatus(
+              response,
+              `Router configuration request for ${url.pathname}`,
+              [200],
+            );
+            if (/action=["']check\.php["']/i.test(response.body)) {
+              throw new Error(
+                `Router configuration request for ${url.pathname} returned the login page`,
+              );
+            }
+            pages.push({
+              url: `${url.pathname}${url.search}`,
+              pageHeading: match(
+                response.body,
+                /<h1[^>]*>([^<]*)<\/h1>/i,
+              ),
+              inputControls: configurationInputControls(response.body),
+              selectControls: configurationSelectControls(response.body),
+            });
+          }
+          const release = await releaseOwnedSession(
+            authenticated.session,
+            authenticated.baseUrl,
+          );
+          releaseAttempted = true;
+          const result = {
+            observedAt: new Date().toISOString(),
+            pages,
+            sessionReleased: release.released,
+            sessionReleaseError: release.error,
+          };
+          const handle = await context.writeResource(
+            "networkConfiguration",
+            methodArgs.name ?? "router-network-configuration",
+            result,
+          );
+          context.logger.info("Inspected router Wi-Fi and DHCP configuration", {
+            pageCount: result.pages.length,
+            sessionReleased: result.sessionReleased,
+          });
+          return { dataHandles: [handle] };
+        } finally {
+          if (!conflict && !releaseAttempted) {
+            await releaseOwnedSession(
+              authenticated.session,
+              authenticated.baseUrl,
+            );
+          }
+          await authenticated.session.close();
+        }
+      },
+    },
     listDevices: {
       description: "List online devices reported by the router",
       arguments: z.object({}),
@@ -2069,6 +2360,18 @@ export const model = {
               authenticated.baseUrl,
             ),
             ajaxCalls: ajaxCalls(response.body, authenticated.baseUrl),
+            inputControls: configurationInputControls(
+              response.body,
+              [
+                "/arc_static_dhcp.php",
+                "/lan.php",
+                "/wifi.php",
+                "/wifi_spectrum_analyzer.php",
+                "/wireless_network_configuration.php",
+                "/wireless_network_configuration_generic.php",
+              ].includes(methodArgs.pagePath),
+            ),
+            selectControls: configurationSelectControls(response.body),
             sessionReleased: release.released,
             sessionReleaseError: release.error,
           };

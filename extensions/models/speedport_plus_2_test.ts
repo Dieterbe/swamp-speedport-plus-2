@@ -3,11 +3,175 @@ import {
   assertRejects,
   assertThrows,
 } from "jsr:@std/assert@1.0.19";
-import { model } from "./speedport_plus_2.ts";
+import { model, testHelpers } from "./speedport_plus_2.ts";
 
 Deno.test("exports the expected model identity and version", () => {
   assertEquals(model.type, "@dieter/speedport-plus-2");
-  assertEquals(model.version, "2026.08.25.1");
+  assertEquals(model.version, "2026.09.07.2");
+});
+
+Deno.test("allows read-only inspection of Wi-Fi and LAN configuration pages", () => {
+  for (
+    const pagePath of [
+      "/arc_static_dhcp.php",
+      "/lan.php",
+      "/wifi.php",
+      "/wifi_spectrum_analyzer.php",
+      "/wireless_network_configuration.php",
+      "/wireless_network_configuration_generic.php",
+      "/wireless_wisp.php",
+    ]
+  ) {
+    assertEquals(
+      model.methods.inspectPage.arguments.parse({ pagePath }).pagePath,
+      pagePath,
+    );
+  }
+});
+
+Deno.test("redacts sensitive form values while retaining diagnostic state", () => {
+  const controls = testHelpers.configurationInputControls(`
+    <input id="ssid" name="ssid" value="angel">
+    <input id="maximum_clients" name="maximum_clients" value="16">
+    <input type="password" id="wifi_password" value="never-store-this">
+    <input type="hidden" name="csrfp_token" value="never-store-token">
+    <input type="hidden" name="configInfo" value="never-store-config">
+    <input id="radius_server_key" value="never-store-radius-key">
+    <input id="IGMP_Snooping" value="enabled">
+    <input type="checkbox" id="band_steering" checked disabled value="1">
+  `);
+  assertEquals(controls, [
+    {
+      id: "ssid",
+      name: "ssid",
+      type: "text",
+      checked: false,
+      disabled: false,
+      sensitive: false,
+      value: "angel",
+    },
+    {
+      id: "maximum_clients",
+      name: "maximum_clients",
+      type: "text",
+      checked: false,
+      disabled: false,
+      sensitive: false,
+      value: "16",
+    },
+    {
+      id: "wifi_password",
+      name: null,
+      type: "password",
+      checked: false,
+      disabled: false,
+      sensitive: true,
+      value: null,
+    },
+    {
+      id: null,
+      name: "csrfp_token",
+      type: "hidden",
+      checked: false,
+      disabled: false,
+      sensitive: true,
+      value: null,
+    },
+    {
+      id: null,
+      name: "configInfo",
+      type: "hidden",
+      checked: false,
+      disabled: false,
+      sensitive: true,
+      value: null,
+    },
+    {
+      id: "radius_server_key",
+      name: null,
+      type: "text",
+      checked: false,
+      disabled: false,
+      sensitive: true,
+      value: null,
+    },
+    {
+      id: "IGMP_Snooping",
+      name: null,
+      type: "text",
+      checked: false,
+      disabled: false,
+      sensitive: false,
+      value: "enabled",
+    },
+    {
+      id: "band_steering",
+      name: null,
+      type: "checkbox",
+      checked: true,
+      disabled: true,
+      sensitive: false,
+      value: "1",
+    },
+  ]);
+});
+
+Deno.test("records selected options without retaining unrelated page content", () => {
+  assertEquals(
+    testHelpers.configurationSelectControls(`
+      <select id="channel" name="channel">
+        <option value="auto">Auto</option>
+        <option value="2" selected>2</option>
+      </select>
+    `),
+    [{
+      id: "channel",
+      name: "channel",
+      disabled: false,
+      options: [
+        { value: "auto", label: "Auto", selected: false },
+        { value: "2", label: "2", selected: true },
+      ],
+    }],
+  );
+});
+
+Deno.test("redacts all input values outside approved diagnostic pages", () => {
+  assertEquals(
+    testHelpers.configurationInputControls(
+      '<input id="pppoe_username" value="subscriber@example.test">',
+      false,
+    ),
+    [{
+      id: "pppoe_username",
+      name: null,
+      type: "text",
+      checked: false,
+      disabled: false,
+      sensitive: true,
+      value: null,
+    }],
+  );
+});
+
+Deno.test("follows only same-origin numeric wireless edit links", () => {
+  const urls = testHelpers.discoveredWirelessEditUrls(
+    `
+    <a href="wireless_network_configuration_edit.php?id=1">main</a>
+    <a href="/wireless_network_configuration_edit_guest_network.php?guest_id=4">guest</a>
+    <a href="wireless_network_configuration_edit.php?id=1&amp;unsafe=yes">extra</a>
+    <a href="wireless_network_configuration_edit.php?id=../../admin">path</a>
+    <a href="https://example.test/wireless_network_configuration_edit.php?id=2">external</a>
+  `,
+    new URL("https://192.0.2.1/"),
+  );
+  assertEquals(
+    urls.map((url) => `${url.pathname}${url.search}`),
+    [
+      "/wireless_network_configuration_edit_guest_network.php?guest_id=4",
+      "/wireless_network_configuration_edit.php?id=1",
+    ],
+  );
 });
 
 Deno.test("separates read-only discovery from explicit session action", () => {
@@ -20,6 +184,7 @@ Deno.test("separates read-only discovery from explicit session action", () => {
   assertEquals("status" in model.methods, true);
   assertEquals("inspectDeviceContract" in model.methods, true);
   assertEquals("listDevices" in model.methods, true);
+  assertEquals("inspectNetworkConfiguration" in model.methods, true);
   assertEquals("action" in model.methods, true);
 });
 
