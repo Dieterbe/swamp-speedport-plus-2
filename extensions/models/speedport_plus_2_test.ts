@@ -7,7 +7,7 @@ import { model, testHelpers } from "./speedport_plus_2.ts";
 
 Deno.test("exports the expected model identity and version", () => {
   assertEquals(model.type, "@dieter/speedport-plus-2");
-  assertEquals(model.version, "2026.09.07.2");
+  assertEquals(model.version, "2026.09.07.3");
 });
 
 Deno.test("allows read-only inspection of Wi-Fi and LAN configuration pages", () => {
@@ -130,6 +130,20 @@ Deno.test("fails closed for unknown and camelCase input values", () => {
   );
 });
 
+Deno.test("redacts input values when any identifier is unsafe", () => {
+  const controls = testHelpers.configurationInputControls(`
+    <input id="ssid" name="preSharedKey" value="never-store-mixed-input">
+    <input id="unexpectedField" name="ssid" value="never-store-reversed-input">
+  `);
+  assertEquals(
+    controls.map(({ sensitive, value }) => ({ sensitive, value })),
+    [
+      { sensitive: true, value: null },
+      { sensitive: true, value: null },
+    ],
+  );
+});
+
 Deno.test("records selected options without retaining unrelated page content", () => {
   assertEquals(
     testHelpers.configurationSelectControls(`
@@ -172,6 +186,30 @@ Deno.test("redacts values and labels for unknown select controls", () => {
   );
 });
 
+Deno.test("redacts select values when any identifier is unsafe", () => {
+  const controls = testHelpers.configurationSelectControls(`
+    <select id="channel" name="preSharedKey">
+      <option value="never-store-mixed-select" selected>Secret label</option>
+    </select>
+    <select id="credentialMode" name="channel">
+      <option value="never-store-reversed-select" selected>Other secret</option>
+    </select>
+  `);
+  assertEquals(
+    controls.map(({ sensitive, options }) => ({ sensitive, options })),
+    [
+      {
+        sensitive: true,
+        options: [{ value: null, label: null, selected: true }],
+      },
+      {
+        sensitive: true,
+        options: [{ value: null, label: null, selected: true }],
+      },
+    ],
+  );
+});
+
 Deno.test("disables curl configuration and limits downloads", () => {
   const args = testHelpers.curlSafetyArguments(1024);
   assertEquals(args[0], "--disable");
@@ -182,6 +220,23 @@ Deno.test("disables curl configuration and limits downloads", () => {
     "1024",
   ]);
   assertThrows(() => testHelpers.curlSafetyArguments(0));
+});
+
+Deno.test("requires curl 8.4.0 or newer for bounded downloads", () => {
+  assertEquals(
+    testHelpers.requireSupportedCurlVersion("curl 8.4.0 (x86_64-linux)"),
+    "8.4.0",
+  );
+  assertEquals(
+    testHelpers.requireSupportedCurlVersion("curl 8.21.0 (x86_64-linux)"),
+    "8.21.0",
+  );
+  assertThrows(() =>
+    testHelpers.requireSupportedCurlVersion("curl 8.3.9 (x86_64-linux)")
+  );
+  assertThrows(() =>
+    testHelpers.requireSupportedCurlVersion("unexpected version output")
+  );
 });
 
 Deno.test("redacts all input values outside approved diagnostic pages", () => {

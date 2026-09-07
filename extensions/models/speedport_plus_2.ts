@@ -461,7 +461,8 @@ function configurationInputControls(
     );
     const sensitive = !retainNonSensitiveValues || type === "password" ||
       type === "hidden" ||
-      !identifiers.some(isSafeConfigurationInputValue);
+      (identifiers.length === 0 ||
+        !identifiers.every(isSafeConfigurationInputValue));
     const rawValue = match(attributes, /\bvalue=["']([^"']*)["']/i);
     return {
       id,
@@ -495,7 +496,8 @@ function configurationSelectControls(html: string): Array<{
       const identifiers = [id, name].filter((value): value is string =>
         value !== null
       );
-      const sensitive = !identifiers.some(isSafeConfigurationSelectValue);
+      const sensitive = identifiers.length === 0 ||
+        !identifiers.every(isSafeConfigurationSelectValue);
       return {
         id,
         name,
@@ -597,12 +599,59 @@ function curlSafetyArguments(maxResponseBytes: number): string[] {
   ];
 }
 
+function requireSupportedCurlVersion(versionOutput: string): string {
+  const matched = /^curl (\d+)\.(\d+)\.(\d+)\b/m.exec(versionOutput);
+  if (matched === null) {
+    throw new Error("Unable to determine the installed curl version");
+  }
+  const version = matched.slice(1, 4).map(Number);
+  const minimum = [8, 4, 0];
+  for (let index = 0; index < minimum.length; index++) {
+    if (version[index] > minimum[index]) break;
+    if (version[index] < minimum[index]) {
+      throw new Error(
+        `curl ${
+          version.join(".")
+        } is unsupported; curl 8.4.0 or newer is required for bounded downloads`,
+      );
+    }
+  }
+  return version.join(".");
+}
+
+async function verifyCurlRuntime(): Promise<void> {
+  let output: Deno.CommandOutput;
+  try {
+    output = await new Deno.Command("curl", {
+      args: ["--disable", "--version"],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+  } catch (error) {
+    throw new Error(
+      `Unable to execute curl: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
+  }
+  if (!output.success) {
+    throw new Error(
+      `Unable to determine curl version: ${
+        new TextDecoder().decode(output.stderr).trim()
+      }`,
+    );
+  }
+  requireSupportedCurlVersion(new TextDecoder().decode(output.stdout));
+}
+
 /** Parsing helpers exported only for deterministic fixture tests. */
 export const testHelpers = {
   configurationInputControls,
   configurationSelectControls,
   curlSafetyArguments,
   discoveredWirelessEditUrls,
+  requireSupportedCurlVersion,
 };
 
 function discoveredWirelessEditUrls(html: string, baseUrl: URL): URL[] {
@@ -1182,6 +1231,7 @@ class CurlSession {
     allowInsecureTls: boolean,
     pinnedPublicKey: string | undefined,
   ): Promise<CurlSession> {
+    await verifyCurlRuntime();
     return new CurlSession(
       await Deno.makeTempDir({ prefix: "speedport-plus-2-" }),
       allowInsecureTls,
@@ -1442,7 +1492,7 @@ async function authenticatedHome(args: GlobalArgs): Promise<{
 /** Read-only model for the Arcadyan Speedport Plus 2 web interface. */
 export const model = {
   type: "@dieter/speedport-plus-2",
-  version: "2026.09.07.2",
+  version: "2026.09.07.3",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -1474,6 +1524,12 @@ export const model = {
       toVersion: "2026.09.07.2",
       description:
         "Inspect the router's actual LAN and DHCP configuration pages",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.07.3",
+      description:
+        "Close redaction bypasses and require bounded curl downloads",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

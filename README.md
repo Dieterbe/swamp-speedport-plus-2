@@ -6,7 +6,7 @@ reference a Swamp vault without embedding secrets in the extension or model
 configuration.
 
 The extension uses the router's native encrypted login protocol and system
-`curl` because the router presents a self-signed TLS certificate. System
+`curl` 8.4.0 or newer because the router presents a self-signed TLS certificate. System
 `openssl` performs the firmware-compatible AES operation. A browser automation
 driver was considered, but it adds a large runtime dependency and is inferior
 for typed, repeatable status collection. Disabling TLS verification globally was
@@ -97,11 +97,15 @@ persists.
 ## Requirements
 
 - Linux x86-64
-- `curl`
+- `curl` 8.4.0 or newer
 - `openssl`
 - Network access to the router web interface
 
 Only Linux x86-64 is declared because it is the platform currently verified.
+Curl 8.4.0 is the minimum because earlier releases cannot bound a response
+whose size is not declared before transfer. Streaming responses inside the
+extension was considered, but requiring curl's corrected `--max-filesize`
+behavior keeps the request path simpler and consistently bounded.
 
 ## Install
 
