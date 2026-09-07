@@ -46,6 +46,9 @@ const ResourceNameSchema = z.string().regex(
   "Resource name must start with a lowercase letter or digit and contain only lowercase letters, digits, underscores, or hyphens",
 );
 
+const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const LOG_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+
 const SnapshotSchema = z.object({
   observedAt: z.iso.datetime(),
   baseUrl: z.string().url(),
@@ -143,9 +146,10 @@ const PageInspectionSchema = z.object({
     id: z.string().nullable(),
     name: z.string().nullable(),
     disabled: z.boolean(),
+    sensitive: z.boolean(),
     options: z.array(z.object({
-      value: z.string(),
-      label: z.string(),
+      value: z.string().nullable(),
+      label: z.string().nullable(),
       selected: z.boolean(),
     })),
   })),
@@ -452,10 +456,12 @@ function configurationInputControls(
     const name = match(attributes, /\bname=["']([^"']+)["']/i);
     const type = match(attributes, /\btype=["']([^"']+)["']/i)
       ?.toLowerCase() ?? "text";
-    const identifier = `${id ?? ""} ${name ?? ""}`;
+    const identifiers = [id, name].filter((value): value is string =>
+      value !== null
+    );
     const sensitive = !retainNonSensitiveValues || type === "password" ||
-      /(?:csrf|token|password|passwd|secret|passphrase|psk|configinfo|(?:^|[\s_.-])(?:pin|key)(?:$|[\s_.-])|(?:wifi|radius)[\w.-]*key)/i
-        .test(identifier);
+      type === "hidden" ||
+      !identifiers.some(isSafeConfigurationInputValue);
     const rawValue = match(attributes, /\bvalue=["']([^"']*)["']/i);
     return {
       id,
@@ -475,28 +481,127 @@ function configurationSelectControls(html: string): Array<{
   id: string | null;
   name: string | null;
   disabled: boolean;
-  options: Array<{ value: string; label: string; selected: boolean }>;
+  sensitive: boolean;
+  options: Array<{
+    value: string | null;
+    label: string | null;
+    selected: boolean;
+  }>;
 }> {
   return [...html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)].map(
-    (select) => ({
-      id: match(select[1], /\bid=["']([^"']+)["']/i),
-      name: match(select[1], /\bname=["']([^"']+)["']/i),
-      disabled: /\bdisabled(?:\s*=|\s|$)/i.test(select[1]),
-      options: [...select[2].matchAll(
-        /<option\b([^>]*)>([\s\S]*?)<\/option>/gi,
-      )].map((option) => ({
-        value: match(option[1], /\bvalue=["']([^"']*)["']/i) ?? "",
-        label: plainText(option[2]).slice(0, 120),
-        selected: /\bselected(?:\s*=|\s|$)/i.test(option[1]),
-      })),
-    }),
+    (select) => {
+      const id = match(select[1], /\bid=["']([^"']+)["']/i);
+      const name = match(select[1], /\bname=["']([^"']+)["']/i);
+      const identifiers = [id, name].filter((value): value is string =>
+        value !== null
+      );
+      const sensitive = !identifiers.some(isSafeConfigurationSelectValue);
+      return {
+        id,
+        name,
+        disabled: /\bdisabled(?:\s*=|\s|$)/i.test(select[1]),
+        sensitive,
+        options: [...select[2].matchAll(
+          /<option\b([^>]*)>([\s\S]*?)<\/option>/gi,
+        )].map((option) => ({
+          value: sensitive ? null : plainText(
+            match(option[1], /\bvalue=["']([^"']*)["']/i) ?? "",
+          ).slice(0, 120),
+          label: sensitive ? null : plainText(option[2]).slice(0, 120),
+          selected: /\bselected(?:\s*=|\s|$)/i.test(option[1]),
+        })),
+      };
+    },
   );
+}
+
+const SAFE_CONFIGURATION_INPUT_VALUES = new Set([
+  "Aggregation_MSDU(A-MSDU)",
+  "Aggregation_MSDU(A-MSDU)1",
+  "Auto_Block_Ack",
+  "Auto_Block_Ack1",
+  "BS",
+  "DCS_Channel_Selection",
+  "DCS_Channel_Selection1",
+  "DFS_Channel_Selection",
+  "Decline_BA_Request",
+  "Decline_BA_Request1",
+  "IGMP_Snooping",
+  "IGMP_Snooping1",
+  "Reverse_Direction_Grant",
+  "Reverse_Direction_Grant1",
+  "STBC",
+  "STBC1",
+  "Stateful",
+  "Stateless",
+  "broadcastSSID",
+  "channel",
+  "channel1",
+  "channel_bandwidth",
+  "channel_bandwidth1",
+  "client_iso",
+  "dhcpv4_en",
+  "dns_mode",
+  "dns_ipv6_mode",
+  "dtim",
+  "enableIsolation",
+  "enableWMM",
+  "ipv4_dhcp_lease_time_amount",
+  "ipv6_dhcp_lease_time_amount",
+  "maximum_clients",
+  "network_name",
+  "path",
+  "ssid",
+  "wifi_timerule",
+]);
+
+function isSafeConfigurationInputValue(identifier: string): boolean {
+  return SAFE_CONFIGURATION_INPUT_VALUES.has(identifier) ||
+    /^ipv4_(?:gateway|dhcp_(?:beginning|ending))_address_[1-4]$/.test(
+      identifier,
+    );
+}
+
+const SAFE_CONFIGURATION_SELECT_VALUES = new Set([
+  "Extension_Channel",
+  "auto_channel_number",
+  "channel",
+  "channel_number",
+  "channel_number1",
+  "encryption_method",
+  "filtering_mode",
+  "ipv4_dhcp_lease_time_measure",
+  "ipv4_subnet_mask",
+  "ipv6_dhcp_lease_time_measure",
+  "security",
+  "transmit_power",
+  "wireless_mode",
+  "wps_band",
+]);
+
+function isSafeConfigurationSelectValue(identifier: string): boolean {
+  return SAFE_CONFIGURATION_SELECT_VALUES.has(identifier) ||
+    /^Extension_Channel\d{1,2}$/.test(identifier);
+}
+
+function curlSafetyArguments(maxResponseBytes: number): string[] {
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+    throw new Error("Router response limit must be a positive safe integer");
+  }
+  return [
+    "--disable",
+    "--silent",
+    "--show-error",
+    "--max-filesize",
+    String(maxResponseBytes),
+  ];
 }
 
 /** Parsing helpers exported only for deterministic fixture tests. */
 export const testHelpers = {
   configurationInputControls,
   configurationSelectControls,
+  curlSafetyArguments,
   discoveredWirelessEditUrls,
 };
 
@@ -1089,13 +1194,13 @@ class CurlSession {
     method: "GET" | "POST",
     headers: Headers = new Headers(),
     body?: string,
+    maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
   ): Promise<RouterResponse> {
     requireSafeRouterUrl(url);
     const headerPath = `${this.#directory}/headers.txt`;
     const bodyPath = `${this.#directory}/body.txt`;
     const commandArgs = [
-      "--silent",
-      "--show-error",
+      ...curlSafetyArguments(maxResponseBytes),
       "--max-time",
       "30",
       "--cookie",
@@ -1139,12 +1244,20 @@ class CurlSession {
       await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
     if (output === null || !output.success) {
+      const detail = output === null
+        ? "curl produced no result"
+        : output.code === 63
+        ? `response exceeded the ${maxResponseBytes}-byte safety limit`
+        : new TextDecoder().decode(output.stderr);
       throw new Error(
-        `Router request failed: ${
-          output === null
-            ? "curl produced no result"
-            : new TextDecoder().decode(output.stderr)
-        }`,
+        `Router request failed: ${detail}`,
+      );
+    }
+
+    const bodyInfo = await Deno.stat(bodyPath);
+    if (bodyInfo.size > maxResponseBytes) {
+      throw new Error(
+        `Router response exceeded the ${maxResponseBytes}-byte safety limit`,
       );
     }
 
@@ -2112,6 +2225,7 @@ export const model = {
                 timef: methodArgs.timeFrame,
                 csrfp_token: csrfToken,
               }).toString(),
+              LOG_MAX_RESPONSE_BYTES,
             );
             requireStatus(
               response,
@@ -2120,7 +2234,7 @@ export const model = {
             );
             const byteLength = new TextEncoder().encode(response.body)
               .byteLength;
-            if (byteLength > 5 * 1024 * 1024) {
+            if (byteLength > LOG_MAX_RESPONSE_BYTES) {
               throw new Error(
                 `Router ${category} log response exceeded the 5 MiB safety limit`,
               );
@@ -2675,14 +2789,12 @@ export const model = {
                 ? error.message.slice(0, 200)
                 : "Unknown verification error";
             }}
-          if (verified) {
-            const release = await releaseOwnedSession(
-              authenticated.session,
-              authenticated.baseUrl,
-            );
-            sessionReleased = release.released;
-            sessionReleaseError = release.error;
-          }
+          const release = await releaseOwnedSession(
+            authenticated.session,
+            authenticated.baseUrl,
+          );
+          sessionReleased = release.released;
+          sessionReleaseError = release.error;
           const result = {
             performedAt: new Date().toISOString(),
             operation: "take-over-session" as const,

@@ -4,171 +4,154 @@ Reviewed: 2026-09-07
 
 ## Conclusion
 
-Do not push local commit `1da2800` or publish extension version
-`2026.09.07.2` as-is. The newly added configuration inspection can persist
-credentials that its redaction heuristics fail to recognize. This conflicts
-with the README's claim that password, key, PIN, token, and aggregate
-configuration values are redacted.
+The changes substantially improve the extension and resolve the original curl
+configuration, response-allocation, takeover-cleanup, documentation, and most
+redaction concerns. The current working tree should not yet be published to the
+Swamp registry because one redaction bypass remains and the manifest version has
+not been advanced for these changes.
 
 The GitHub repository is already public at
 <https://github.com/Dieterbe/swamp-speedport-plus-2>. At review time,
-`origin/main` ended at `04fc4e7`; local commit `1da2800` had not been pushed.
+`origin/main` ended at `04fc4e7`, local `HEAD` was `0d2dabf`, and the security
+improvements reviewed here were uncommitted working-tree changes.
 
-## Findings
+## Current findings
 
-### High: configuration redaction can persist credentials
+### High: mixed safe and unsafe identifiers bypass redaction
 
-`configurationInputControls` decides whether to retain a value using the input
-type and a regular expression over the field's `id` and `name`:
+Input and select controls are now retained only when an identifier appears in a
+safe-field allowlist. This is the correct general design because unknown fields
+fail closed. However, the implementation accepts a control when **any** present
+identifier is safe:
 
-- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L446)
 - [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L456)
+- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L498)
 
-This heuristic misses plausible camelCase identifiers such as `preSharedKey`,
-`wpaKey`, and `encryptionKey`. Unknown hidden fields are also retained unless
-their names match the expression. A direct parser check confirmed that example
-`preSharedKey` and `wpaKey` values were classified as non-sensitive and returned
-with their values intact.
+Consequently, a control such as an input with `id="ssid"` and
+`name="preSharedKey"` retains its value because `ssid` is allowlisted. A select
+with one safe and one unsafe identifier has the same problem. The resulting
+control state is written to a persistent resource by
+`inspectNetworkConfiguration`.
 
-Select controls have no sensitivity classification. Their option values and
-labels are always retained:
+Require at least one identifier and require **every** present identifier to be
+allowlisted. Add regression tests containing conflicting safe and unsafe `id`
+and `name` values for both input and select controls.
 
-- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L476)
+The reason for using `some` cannot be determined from the code or
+documentation. It is inferior here because a false negative can persist a
+credential, while a false positive merely withholds diagnostic data.
 
-`inspectNetworkConfiguration` writes the resulting controls to a persistent
-Swamp resource:
+### Medium: response limiting is incomplete on curl before 8.4.0
 
-- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L1519)
+The common request layer now places `--max-filesize` on curl and checks the
+downloaded file size before loading it into memory:
 
-This matters because router configuration pages are precisely where Wi-Fi
-keys, administrative tokens, and opaque configuration values may appear. The
-current behavior contradicts the documented redaction guarantee:
+- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L586)
+- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L1257)
 
-- [`README.md`](README.md#L31)
+This protects memory and, with curl 8.4.0 or newer, aborts an in-progress
+transfer at the threshold. Before curl 8.4.0, `--max-filesize` has no effect when
+the server does not declare the size before transfer. The post-download file
+check still protects memory, but temporary disk consumption remains bounded
+only by the 30-second timeout.
 
-Recommended remediation:
+Require curl 8.4.0 or newer at runtime and document that minimum. An alternative
+is to enforce the limit while consuming curl stdout in the extension, but that
+is more complex than relying on the corrected curl behavior.
 
-- Retain values only for an explicit allowlist of known-safe fields.
-- Redact all hidden inputs by default.
-- Apply the same policy to select option values and labels.
-- Store selected indexes or validated enum values where that provides enough
-  diagnostic information.
-- Add negative tests for camelCase key names, unknown hidden inputs, and
-  sensitive select controls.
+### Low: release metadata has not been advanced
 
-An expanding denylist was considered and rejected because router firmware can
-introduce new identifiers and naming styles. A safe-field allowlist fails
-closed and is therefore preferable when the output is persisted.
+The model and manifest still identify version `2026.09.07.2`, although the
+working tree changes runtime behavior and schemas. Advance the version using
+the Swamp version command before a registry dry run. Reusing an existing version
+was rejected because consumers and the registry need an immutable identity for
+the changed artifact.
 
-### Medium: curl loads user configuration
+## Resolved findings
 
-The curl argument list begins with `--silent` rather than `--disable`:
+### Configuration values now fail closed by default
 
-- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L1096)
+Unknown and camelCase credential-like input names, all hidden inputs, and input
+values outside approved diagnostic pages are now redacted. Select controls now
+carry a sensitivity flag and redact both option values and labels unless their
+identifier is explicitly allowlisted. Tests cover these cases.
 
-Curl may therefore load the executing user's `.curlrc`. That file can alter
-TLS, proxy, redirect, URL, and request behavior, weakening the extension's
-explicit endpoint and TLS controls.
+This resolves the original denylist weakness except for the mixed-identifier
+bypass described above.
 
-Add `--disable` as the first curl argument. Environment-dependent curl
-configuration was not retained because deterministic request behavior is more
-important for an extension that transmits router credentials.
+### Curl no longer loads `.curlrc`
 
-### Medium: response limits are enforced after download and allocation
+`--disable` is now the first curl argument, preventing user curl configuration
+from silently changing TLS, proxy, redirect, URL, or request behavior:
 
-The common request method downloads the complete response and then loads the
-body into memory:
+- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L592)
 
-- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L1166)
+### Bodies are checked before memory allocation
 
-The 5 MiB log limit is checked only after that read. It prevents an oversized
-Swamp resource from being created, but it does not protect temporary disk or
-memory from a compromised or malfunctioning endpoint.
+Normal responses default to 2 MiB and log responses to 5 MiB. Curl receives the
+limit, exit code 63 is translated into a clear error, and the temporary file is
+checked before `readTextFile`. This resolves the previous unbounded-memory
+finding. The older-curl disk limitation is tracked separately above.
 
-Enforce a size limit in the common request layer before reading the body. A
-conservative default with an explicit larger allowance for log requests is
-preferable to method-specific checks after allocation because every response
-parser shares the same exposure.
+### Takeover logout is unconditional after the POST
 
-### Medium: failed takeover verification can leave a session active
+After a completed takeover request, logout is now attempted regardless of
+verification success:
 
-After the takeover POST, logout is attempted only when verification succeeds:
+- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L2792)
 
-- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L2678)
+Verification and logout results remain separately recorded.
 
-The final cleanup removes only the local temporary directory:
+### README publication details are corrected
 
-- [`extensions/models/speedport_plus_2.ts`](extensions/models/speedport_plus_2.ts#L2709)
-
-If takeover succeeds but verification fails, the newly acquired router session
-may remain active. Attempt logout after any completed takeover POST, including
-when verification fails, and record verification and logout outcomes
-separately. Conditional cleanup was rejected because verification failure does
-not establish that the takeover itself failed.
-
-### Low: README publication and setup details
-
-The first mention of Swamp in the README is plain text:
-
-- [`README.md`](README.md#L3)
-
-Repository convention requires that first mention to link to
-<https://swamp-club.com>.
-
-The installation example uses `192.0.2.1`, an address reserved for
-documentation:
-
-- [`README.md`](README.md#L116)
-
-Using a documentation address avoids implying that a specific private address
-is universal, but readers should be told explicitly to replace both `baseUrl`
-and `expectedHost` with their router's address.
+The first Swamp mention now links to <https://swamp-club.com>, and the setup text
+explicitly tells readers to replace both documentation address values with
+their router's address.
 
 ## Positive observations
 
 - Router URLs require HTTPS and cannot contain embedded credentials.
-- Normal TLS certificate verification remains enabled unless explicitly
-  disabled.
-- Insecure TLS requires a syntactically valid pinned public key.
+- Normal TLS validation remains enabled unless explicitly disabled.
+- Insecure TLS requires a syntactically valid public-key pin.
 - Redirects are restricted to the configured origin.
 - Commands use argument arrays and stdin rather than shell interpolation.
 - Wireless edit-page discovery permits only same-origin enumerated paths with
   numeric identifiers and caps discovery at 32 pages.
 - Resource names are narrowly validated.
-- No embedded secrets, dynamic evaluation, or suspicious external destination
-  was found in the current tree.
-- The repository uses the expected dedicated directory and GitHub repository.
-- The manifest points to the reachable public repository.
-- The root MIT license follows the selected publication convention.
+- No embedded secrets, dynamic evaluation, suspicious external destination, or
+  environment-variable credential access was found in the current tree.
+- The repository layout, dedicated GitHub repository, reachable manifest URL,
+  and root MIT license follow the selected publication conventions.
 
 ## Validation results
 
-The following checks passed during this review:
+The following checks passed after the improvements:
 
 - Deno type checking for the model and tests.
-- All 12 Deno tests.
+- All 15 Deno tests.
 - `swamp extension fmt manifest.yaml --check --json`.
 - `swamp extension quality manifest.yaml --json`, including dependency trust.
 - `git diff --check`.
-- Current-tree checks for common private-key, access-token, dynamic-evaluation,
-  and unfinished-work markers.
+- Current-tree checks for common private keys, access tokens, dynamic
+  evaluation, environment-secret access, and unfinished-work markers.
 
-The automated checks do not exercise actual curl construction, enforce a
-pre-download response limit, verify takeover cleanup, or detect the demonstrated
-redaction bypass. Passing them does not remove the publication blocker.
+The installed curl was version 8.21.0, so its in-progress size limiting has the
+required modern behavior. Tests verify construction of the safety arguments but
+do not execute curl against oversized or chunked responses. Tests also do not
+yet cover conflicting safe and unsafe control identifiers.
 
 ## Publication recommendation
 
-The source can be public after the high-severity redaction issue is fixed and
-covered by regression tests. The three medium findings should also be resolved
-before recommending the extension for general Swamp registry use.
+Do not publish the current working tree to the Swamp registry yet. Before
+release:
 
-Before release:
+1. Require every present input/select identifier to be allowlisted and add
+   mixed-identifier regression tests.
+2. Require and document curl 8.4.0 or newer, or implement a version-independent
+   streaming download limit.
+3. Advance the extension and manifest version.
+4. Rerun type checking, tests, formatting, quality checks, and a registry dry
+   run.
 
-1. Replace heuristic value retention with a fail-closed safe-field policy.
-2. Add `--disable` as curl's first argument.
-3. Enforce response limits before loading bodies into memory.
-4. Make post-takeover logout unconditional once the POST was completed.
-5. Correct the README link and clarify placeholder router configuration.
-6. Rerun type checking, tests, formatting, quality checks, and a registry dry
-   run before publishing.
+After those items pass, no known security issue in this review would prevent
+public release.

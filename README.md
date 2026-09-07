@@ -1,7 +1,7 @@
 # @dieter/speedport-plus-2
 
 Observe an Arcadyan Speedport Plus 2 router through its web interface using
-Swamp. Credentials are sensitive global arguments, allowing definitions to
+[Swamp](https://swamp-club.com). Credentials are sensitive global arguments, allowing definitions to
 reference a Swamp vault without embedding secrets in the extension or model
 configuration.
 
@@ -110,6 +110,9 @@ swamp extension pull @dieter/speedport-plus-2
 ```
 
 Create a model definition with vault-backed credentials:
+
+Replace both documentation address values below with the HTTPS address and
+exact hostname or IP address of your router.
 
 ```sh
 swamp model create @dieter/speedport-plus-2 home-router \

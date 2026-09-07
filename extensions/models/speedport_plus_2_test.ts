@@ -110,10 +110,24 @@ Deno.test("redacts sensitive form values while retaining diagnostic state", () =
       type: "checkbox",
       checked: true,
       disabled: true,
-      sensitive: false,
-      value: "1",
+      sensitive: true,
+      value: null,
     },
   ]);
+});
+
+Deno.test("fails closed for unknown and camelCase input values", () => {
+  const controls = testHelpers.configurationInputControls(`
+    <input id="preSharedKey" value="never-store-pre-shared-key">
+    <input name="wpaKey" value="never-store-wpa-key">
+    <input id="encryptionKey" value="never-store-encryption-key">
+    <input type="hidden" id="firmwareState" value="never-store-hidden-state">
+    <input id="unexpectedField" value="never-store-unknown-value">
+  `);
+  assertEquals(
+    controls.map(({ sensitive, value }) => ({ sensitive, value })),
+    Array.from({ length: 5 }, () => ({ sensitive: true, value: null })),
+  );
 });
 
 Deno.test("records selected options without retaining unrelated page content", () => {
@@ -128,12 +142,46 @@ Deno.test("records selected options without retaining unrelated page content", (
       id: "channel",
       name: "channel",
       disabled: false,
+      sensitive: false,
       options: [
         { value: "auto", label: "Auto", selected: false },
         { value: "2", label: "2", selected: true },
       ],
     }],
   );
+});
+
+Deno.test("redacts values and labels for unknown select controls", () => {
+  assertEquals(
+    testHelpers.configurationSelectControls(`
+      <select id="credentialMode">
+        <option value="preSharedKey">Use key</option>
+        <option value="never-store-select-secret" selected>Secret label</option>
+      </select>
+    `),
+    [{
+      id: "credentialMode",
+      name: null,
+      disabled: false,
+      sensitive: true,
+      options: [
+        { value: null, label: null, selected: false },
+        { value: null, label: null, selected: true },
+      ],
+    }],
+  );
+});
+
+Deno.test("disables curl configuration and limits downloads", () => {
+  const args = testHelpers.curlSafetyArguments(1024);
+  assertEquals(args[0], "--disable");
+  assertEquals(args.slice(1), [
+    "--silent",
+    "--show-error",
+    "--max-filesize",
+    "1024",
+  ]);
+  assertThrows(() => testHelpers.curlSafetyArguments(0));
 });
 
 Deno.test("redacts all input values outside approved diagnostic pages", () => {
