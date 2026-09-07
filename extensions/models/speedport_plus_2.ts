@@ -5,30 +5,23 @@
  */
 import { z } from "npm:zod@4";
 
-const RouterBaseUrlSchema = z.string().url()
-  .refine((value) => {
-    try {
-      return new URL(value).protocol === "https:";
-    } catch {
-      return false;
-    }
-  }, "Router base URL must use HTTPS")
-  .refine((value) => {
-    try {
-      const url = new URL(value);
-      return url.username === "" && url.password === "";
-    } catch {
-      return false;
-    }
-  }, "Router base URL must not contain a username or password");
-
-const PinnedPublicKeySchema = z.string().regex(
-  /^sha256\/[\/][A-Za-z0-9+/]{43}=$/,
-  "Pinned public key must use curl's sha256//BASE64 format",
-);
-
 const GlobalArgsSchema = z.object({
-  baseUrl: RouterBaseUrlSchema,
+  baseUrl: z.string().url()
+    .refine((value) => {
+      try {
+        return new URL(value).protocol === "https:";
+      } catch {
+        return false;
+      }
+    }, "Router base URL must use HTTPS")
+    .refine((value) => {
+      try {
+        const url = new URL(value);
+        return url.username === "" && url.password === "";
+      } catch {
+        return false;
+      }
+    }, "Router base URL must not contain a username or password"),
   expectedHost: z.string().min(1).max(253).regex(
     /^[A-Za-z0-9.[\]:_-]+$/,
     "Expected host must be a hostname or IP address without a scheme or path",
@@ -36,7 +29,10 @@ const GlobalArgsSchema = z.object({
   username: z.string().min(1).meta({ sensitive: true }),
   password: z.string().min(1).meta({ sensitive: true }),
   allowInsecureTls: z.boolean().default(false),
-  pinnedPublicKey: PinnedPublicKeySchema.optional(),
+  pinnedPublicKey: z.string().regex(
+    /^sha256\/[\/][A-Za-z0-9+/]{43}=$/,
+    "Pinned public key must use curl's sha256//BASE64 format",
+  ).optional(),
 });
 
 type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
@@ -1492,7 +1488,7 @@ async function authenticatedHome(args: GlobalArgs): Promise<{
 /** Read-only model for the Arcadyan Speedport Plus 2 web interface. */
 export const model = {
   type: "@dieter/speedport-plus-2",
-  version: "2026.09.07.3",
+  version: "2026.09.07.4",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -1530,6 +1526,12 @@ export const model = {
       toVersion: "2026.09.07.3",
       description:
         "Close redaction bypasses and require bounded curl downloads",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.07.4",
+      description:
+        "Expose every router connection argument in registry metadata",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

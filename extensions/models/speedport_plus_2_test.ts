@@ -7,7 +7,7 @@ import { model, testHelpers } from "./speedport_plus_2.ts";
 
 Deno.test("exports the expected model identity and version", () => {
   assertEquals(model.type, "@dieter/speedport-plus-2");
-  assertEquals(model.version, "2026.09.07.3");
+  assertEquals(model.version, "2026.09.07.4");
 });
 
 Deno.test("allows read-only inspection of Wi-Fi and LAN configuration pages", () => {
